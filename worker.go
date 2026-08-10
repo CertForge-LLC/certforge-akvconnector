@@ -10,9 +10,10 @@ import (
 
 // Worker is the main poll-process loop.
 type Worker struct {
-	cfg *Config
-	cf  *certForgeClient
-	akv *akvClient
+	cfg     *Config
+	cf      *certForgeClient
+	akv     *akvClient
+	version string // set from main.Version at startup
 }
 
 // Run polls CertForge for pending keystore jobs until the context is cancelled.
@@ -204,7 +205,7 @@ func (w *Worker) handlePing(ctx context.Context, job Job) error {
 	if err := w.akv.Ping(ctx); err != nil {
 		return fmt.Errorf("ping: %w", err)
 	}
-	return w.cf.CompleteJob(job.ID, map[string]bool{"ok": true})
+	return w.cf.CompleteJob(job.ID, map[string]any{"ok": true, "version": w.version})
 }
 
 func (w *Worker) handleListIssuers(ctx context.Context, job Job) error {

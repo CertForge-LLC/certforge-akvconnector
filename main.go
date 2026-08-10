@@ -47,9 +47,10 @@ func main() {
 	cfClient := newCertForgeClient(cfg.CertForgeURL, cfg.APIKey)
 
 	worker := &Worker{
-		cfg: cfg,
-		cf:  cfClient,
-		akv: akvClient,
+		cfg:     cfg,
+		cf:      cfClient,
+		akv:     akvClient,
+		version: Version,
 	}
 	worker.Run(ctx)
 	log.Println("connector stopped")
