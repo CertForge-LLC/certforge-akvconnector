@@ -24,16 +24,20 @@ type Config struct {
 }
 
 func loadConfig(path string) (*Config, error) {
+	var cfg Config
+
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	// Expand $ENV_VAR references in the YAML before parsing.
-	data = []byte(os.ExpandEnv(string(data)))
-
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		// No config file — container deployments use environment variables only.
+	} else {
+		// Expand $ENV_VAR references in the YAML before parsing.
+		data = []byte(os.ExpandEnv(string(data)))
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parse config: %w", err)
+		}
 	}
 
 	// Environment variable overrides (useful for containers / Kubernetes secrets).
