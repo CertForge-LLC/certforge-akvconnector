@@ -1,0 +1,11 @@
+# compiled binaries
+certforge-akvconnector
+certforge-akvconnector-*
+
+# local config (contains secrets)
+certforge-akvconnector.yaml
+
+# Go
+*.test
+*.out
+vendor/

@@ -1,0 +1,51 @@
+# certforge-akvconnector configuration
+# Copy to certforge-akvconnector.yaml and fill in your values.
+# All fields can also be set via environment variables (see comments).
+
+# CertForge connection
+certforge_url: https://app.certgovernance.app   # $CERTFORGE_URL
+api_key: cc_your_api_key_here                   # $CERTFORGE_API_KEY — org-scoped API key from CertForge Settings > API Keys
+connector_id: your-connector-id-here            # $CONNECTOR_ID — ID shown in CertForge CA Connectors page (copy from the table)
+
+# Azure Key Vault
+vault_url: https://myvault.vault.azure.net      # $AKV_VAULT_URL
+
+# Polling behaviour (optional)
+poll_interval: 5s   # how often to check for pending jobs; default 5s
+log_level: info     # "info" or "debug"
+
+# ─── Authentication ───────────────────────────────────────────────────────────
+#
+# This connector uses Azure DefaultAzureCredential, which tries the following
+# in order — no config required for the first option that succeeds:
+#
+#   1. Environment variables (Service Principal):
+#        AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET  (client secret)
+#        AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_CERTIFICATE_PATH  (cert)
+#
+#   2. Workload Identity Federation (OIDC — no secrets, recommended for GKE/EKS):
+#        AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE
+#
+#   3. Managed Identity (Azure VMs, AKS, Container Apps — zero config):
+#        Automatically uses the assigned identity; no variables needed.
+#        Set AZURE_CLIENT_ID if using a user-assigned managed identity.
+#
+#   4. Azure CLI (local development):
+#        Run `az login` once; the connector picks up the session automatically.
+#
+# The connector requires these Key Vault permissions on the vault:
+#   - Certificates: Get, List, Create, Delete
+#   - Secrets: Get  (needed only for exportable key export)
+#
+# ─── Kubernetes example ───────────────────────────────────────────────────────
+#
+#   Use a ConfigMap for the non-secret fields and a Secret for api_key:
+#
+#   env:
+#     - name: CERTFORGE_API_KEY
+#       valueFrom:
+#         secretKeyRef:
+#           name: certforge-akvconnector
+#           key: api_key
+#     - name: AZURE_CLIENT_ID      # user-assigned managed identity
+#       value: "00000000-0000-0000-0000-000000000000"
