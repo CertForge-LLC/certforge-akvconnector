@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azcertificates"
@@ -144,6 +148,40 @@ func (a *akvClient) GenerateKeyCSR(ctx context.Context, certName string, p Gener
 	return csrPEM, nil
 }
 
+// MergeCertificate uploads the CA-signed certificate into AKV to complete the
+// "Unknown issuer" certificate lifecycle.  After merge, the certificate is
+// visible in AKV, expiry tracking and rotation policies activate, and the key
+// can be used by Azure services that integrate with Key Vault.
+//
+// certPEM may contain the full chain (leaf + intermediates); AKV accepts it.
+func (a *akvClient) MergeCertificate(ctx context.Context, certName string, certPEM []byte) error {
+	// AKV MergeCertificate expects a slice of DER-encoded certificates.
+	var certs [][]byte
+	rest := certPEM
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			certs = append(certs, block.Bytes)
+		}
+	}
+	if len(certs) == 0 {
+		return fmt.Errorf("merge_certificate %s: no CERTIFICATE blocks in PEM", certName)
+	}
+
+	_, err := a.certClient.MergeCertificate(ctx, certName, azcertificates.MergeCertificateParameters{
+		X509Certificates: certs,
+	}, nil)
+	if err != nil && isNotFound(err) {
+		// Certificate may have already been deleted or merged — treat as OK.
+		return nil
+	}
+	return err
+}
+
 // ExportKeyPEM retrieves the private key PEM for an exportable certificate.
 // AKV stores the key as a secret whose name matches the certificate name.
 // Returns an error if the key was created with a non-exportable policy.
@@ -183,7 +221,245 @@ func (a *akvClient) Ping(ctx context.Context) error {
 	return err
 }
 
+// ─── integrated CA issuance ───────────────────────────────────────────────────
+
+// AKVIssuer describes a certificate issuer configured in Azure Key Vault.
+type AKVIssuer struct {
+	Name     string `json:"name"`     // AKV issuer name (e.g. "DigiCert", "GlobalSign-Prod")
+	Provider string `json:"provider"` // AKV provider type (e.g. "DigiCert", "GlobalSign")
+}
+
+// AKVCertInfo is the metadata for a certificate stored in Azure Key Vault.
+type AKVCertInfo struct {
+	Name       string    `json:"name"`        // AKV certificate name
+	Subject    string    `json:"subject"`     // X.509 Subject DN
+	Issuer     string    `json:"issuer"`      // X.509 Issuer DN
+	SANs       []string  `json:"sans"`        // Subject Alternative Names
+	NotBefore  time.Time `json:"not_before"`
+	NotAfter   time.Time `json:"not_after"`
+	Serial     string    `json:"serial"`      // hex-encoded serial number
+	IssuerName string    `json:"issuer_name"` // AKV issuer policy name ("Unknown", "DigiCert", …)
+}
+
+// IssueWithCAParams holds the decoded params for an issue_with_ca job.
+type IssueWithCAParams struct {
+	Domains        []string `json:"domains"`
+	KeyAlgorithm   string   `json:"key_algorithm"`
+	OrgID          string   `json:"org_id"`
+	ApprovalID     string   `json:"approval_id"`
+	Exportable     bool     `json:"exportable"`
+	IssuerName     string   `json:"issuer_name"`     // AKV issuer name (must be pre-configured in vault)
+	ValidityMonths int      `json:"validity_months"` // 0 → 12
+}
+
+// ListIssuers returns all certificate issuers configured in the vault.
+func (a *akvClient) ListIssuers(ctx context.Context) ([]AKVIssuer, error) {
+	pager := a.certClient.NewListIssuerPropertiesPager(nil)
+	var issuers []AKVIssuer
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list_issuers: %w", err)
+		}
+		for _, item := range page.Value {
+			if item == nil || item.ID == nil {
+				continue
+			}
+			// ID is the full URI; extract the last path segment as the name.
+			id := *item.ID
+			parts := strings.Split(strings.TrimRight(id, "/"), "/")
+			name := parts[len(parts)-1]
+			provider := ""
+			if item.Provider != nil {
+				provider = *item.Provider
+			}
+			issuers = append(issuers, AKVIssuer{
+				Name:     name,
+				Provider: provider,
+			})
+		}
+	}
+	return issuers, nil
+}
+
+// ListCerts returns metadata for all certificates stored in the vault.
+// It fetches the full certificate for each entry to extract X.509 fields.
+func (a *akvClient) ListCerts(ctx context.Context) ([]AKVCertInfo, error) {
+	pager := a.certClient.NewListCertificatePropertiesPager(nil)
+	var out []AKVCertInfo
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list_certs: list page: %w", err)
+		}
+		for _, props := range page.Value {
+			if props == nil || props.ID == nil {
+				continue
+			}
+			name := props.ID.Name()
+			info, err := a.fetchCertInfo(ctx, name)
+			if err != nil {
+				// Log and skip individual failures — don't abort the whole list.
+				log.Printf("[akv] list_certs: skip %s: %v", name, err)
+				continue
+			}
+			out = append(out, *info)
+		}
+	}
+	return out, nil
+}
+
+// fetchCertInfo retrieves and parses a single certificate from AKV.
+func (a *akvClient) fetchCertInfo(ctx context.Context, name string) (*AKVCertInfo, error) {
+	resp, err := a.certClient.GetCertificate(ctx, name, "", nil)
+	if err != nil {
+		return nil, fmt.Errorf("get_certificate: %w", err)
+	}
+	if len(resp.CER) == 0 {
+		return nil, fmt.Errorf("get_certificate: empty DER bytes")
+	}
+
+	cert, err := x509.ParseCertificate(resp.CER)
+	if err != nil {
+		return nil, fmt.Errorf("parse certificate: %w", err)
+	}
+
+	info := &AKVCertInfo{
+		Name:      name,
+		Subject:   cert.Subject.String(),
+		Issuer:    cert.Issuer.String(),
+		NotBefore: cert.NotBefore,
+		NotAfter:  cert.NotAfter,
+		Serial:    hex.EncodeToString(cert.SerialNumber.Bytes()),
+	}
+	for _, san := range cert.DNSNames {
+		info.SANs = append(info.SANs, san)
+	}
+	for _, ip := range cert.IPAddresses {
+		info.SANs = append(info.SANs, ip.String())
+	}
+
+	// AKV issuer name from the certificate policy.
+	if resp.Policy != nil && resp.Policy.IssuerParameters != nil && resp.Policy.IssuerParameters.Name != nil {
+		info.IssuerName = *resp.Policy.IssuerParameters.Name
+	}
+
+	return info, nil
+}
+
+// IssueWithCA creates a certificate in AKV using a pre-configured external CA
+// issuer (e.g. DigiCert, GlobalSign).  AKV coordinates with the CA and the
+// connector polls until the operation completes.  Returns the signed cert PEM.
+func (a *akvClient) IssueWithCA(ctx context.Context, certName string, p IssueWithCAParams) ([]byte, error) {
+	if p.IssuerName == "" {
+		return nil, fmt.Errorf("issue_with_ca: issuer_name is required")
+	}
+
+	keyType, keySize, curve := resolveKeyType(p.KeyAlgorithm)
+	exportable := p.Exportable
+	validity := int32(p.ValidityMonths)
+	if validity == 0 {
+		validity = 12
+	}
+
+	domains := p.Domains
+	if len(domains) == 0 {
+		return nil, fmt.Errorf("issue_with_ca: no domains provided")
+	}
+	dnsSANs := make([]*string, len(domains))
+	for i := range domains {
+		s := domains[i]
+		dnsSANs[i] = &s
+	}
+	cn := domains[0]
+	subject := "CN=" + cn
+	contentType := "application/x-pem-file"
+	issuerName := p.IssuerName
+
+	_, err := a.certClient.CreateCertificate(ctx, certName, azcertificates.CreateCertificateParameters{
+		CertificatePolicy: &azcertificates.CertificatePolicy{
+			KeyProperties: &azcertificates.KeyProperties{
+				KeyType:    &keyType,
+				KeySize:    keySize,
+				Curve:      curve,
+				Exportable: &exportable,
+			},
+			SecretProperties: &azcertificates.SecretProperties{
+				ContentType: &contentType,
+			},
+			X509CertificateProperties: &azcertificates.X509CertificateProperties{
+				Subject: &subject,
+				SubjectAlternativeNames: &azcertificates.SubjectAlternativeNames{
+					DNSNames: dnsSANs,
+				},
+				ValidityInMonths: &validity,
+			},
+			IssuerParameters: &azcertificates.IssuerParameters{
+				Name: &issuerName,
+			},
+		},
+	}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("issue_with_ca create %s: %w", certName, err)
+	}
+
+	log.Printf("[akv] issue_with_ca: cert %q submitted to issuer %q, polling for completion", certName, p.IssuerName)
+
+	// Poll until AKV+CA completes (can take minutes for external CAs).
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("issue_with_ca %s: context cancelled while waiting for CA: %w", certName, ctx.Err())
+		case <-time.After(5 * time.Second):
+		}
+
+		op, err := a.certClient.GetCertificateOperation(ctx, certName, nil)
+		if err != nil {
+			return nil, fmt.Errorf("issue_with_ca get_operation %s: %w", certName, err)
+		}
+		if op.Status == nil {
+			continue
+		}
+		switch *op.Status {
+		case "completed":
+			resp, err := a.certClient.GetCertificate(ctx, certName, "", nil)
+			if err != nil {
+				return nil, fmt.Errorf("issue_with_ca get_cert %s: %w", certName, err)
+			}
+			certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: resp.CER})
+			log.Printf("[akv] issue_with_ca: cert %q issued by %q", certName, p.IssuerName)
+			return certPEM, nil
+		case "failed", "cancelled":
+			errMsg := *op.Status
+			if op.Error != nil {
+				errMsg = op.Error.Error()
+			}
+			return nil, fmt.Errorf("issue_with_ca %s: CA returned %s: %s", certName, *op.Status, errMsg)
+		default: // "inProgress" — keep polling
+			log.Printf("[akv] issue_with_ca: cert %q status=%s, waiting…", certName, *op.Status)
+		}
+	}
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
+
+// resolveKeyType maps a CertForge key algorithm string to AKV key parameters.
+func resolveKeyType(keyAlgorithm string) (keyType azcertificates.KeyType, keySize *int32, curve *azcertificates.CurveName) {
+	switch keyAlgorithm {
+	case "rsa-4096":
+		s := int32(4096)
+		return azcertificates.KeyTypeRSA, &s, nil
+	case "ecdsa-p256", "ec-256":
+		c := azcertificates.CurveNameP256
+		return azcertificates.KeyTypeEC, nil, &c
+	case "ecdsa-p384", "ec-384":
+		c := azcertificates.CurveNameP384
+		return azcertificates.KeyTypeEC, nil, &c
+	default: // "rsa-2048" or empty
+		s := int32(2048)
+		return azcertificates.KeyTypeRSA, &s, nil
+	}
+}
 
 // extractPrivateKeyPEM scans a PEM bundle and returns only the private key blocks.
 func extractPrivateKeyPEM(bundle []byte) []byte {
