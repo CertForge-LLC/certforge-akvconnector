@@ -94,8 +94,8 @@ func (w *Worker) handleGenerateKeyCSR(ctx context.Context, job Job) error {
 		return fmt.Errorf("parse params: %w", err)
 	}
 
-	// Derive a deterministic, AKV-safe key name from the approval ID.
-	certName := certNameFromApprovalID(params.ApprovalID)
+	// Derive a deterministic, AKV-safe key name from approval ID + primary domain.
+	certName := certNameFromParams(params.ApprovalID, params.Domains)
 	if certName == "" || certName == "cf-" {
 		return fmt.Errorf("generate_key_csr: approval_id is required to derive key name")
 	}
@@ -235,7 +235,7 @@ func (w *Worker) handleIssueWithCA(ctx context.Context, job Job) error {
 		return fmt.Errorf("issue_with_ca: issuer_name is required")
 	}
 
-	certName := certNameFromApprovalID(params.ApprovalID)
+	certName := certNameFromParams(params.ApprovalID, params.Domains)
 	if certName == "" || certName == "cf-" {
 		return fmt.Errorf("issue_with_ca: approval_id is required to derive cert name")
 	}

@@ -488,11 +488,38 @@ func isNotFound(err error) bool {
 		strings.Contains(err.Error(), "SecretNotFound")
 }
 
-// certNameFromApprovalID produces an AKV-safe certificate name from a CertForge
-// approval ID.  AKV names must start with a letter, contain only letters/digits/hyphens.
-// UUID approval IDs satisfy the character set requirement; we add "cf-" prefix.
-func certNameFromApprovalID(approvalID string) string {
-	// Replace any non-alphanumeric, non-hyphen characters.
+// akvSanitize replaces any character not in [a-zA-Z0-9-] with a hyphen.
+var akvSanitize = strings.NewReplacer(".", "-", "*", "wc", "_", "-")
+
+// certNameFromParams produces a human-readable, AKV-safe certificate name.
+// Format: cf-<8-char-approvalID>-<primary-domain>
+// e.g. "cf-e91a66be-myapp-example-com"
+// Falls back to cf-<full-approvalID> if no domains are provided.
+// AKV names: [a-zA-Z0-9-], max 127 chars, must start with a letter.
+func certNameFromParams(approvalID string, domains []string) string {
+	id := approvalID
+	if len(id) > 8 {
+		id = id[:8]
+	}
+	if len(domains) > 0 {
+		domain := akvSanitize.Replace(domains[0])
+		// Strip any remaining non-AKV chars
+		var b strings.Builder
+		for _, r := range domain {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
+				b.WriteRune(r)
+			}
+		}
+		domain = strings.Trim(b.String(), "-")
+		if domain != "" {
+			name := fmt.Sprintf("cf-%s-%s", id, domain)
+			if len(name) > 127 {
+				name = name[:127]
+			}
+			return name
+		}
+	}
+	// Fallback: cf-<full-approvalID>
 	safe := strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
 			return r
