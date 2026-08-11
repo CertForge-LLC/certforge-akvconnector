@@ -130,8 +130,14 @@ func (a *akvClient) GenerateKeyCSR(ctx context.Context, certName string, p Gener
 			},
 		},
 	}, nil)
-	if err != nil {
+	if err != nil && !isConflict(err) {
 		return nil, fmt.Errorf("create certificate %s: %w", certName, err)
+	}
+	if isConflict(err) {
+		// A previous generate_key_csr left a pending operation (e.g. the prior
+		// attempt timed out before merge). Reuse the existing CSR so the retry
+		// can proceed without needing to cancel and recreate the key.
+		log.Printf("[akv] certificate %s already has an inProgress operation — reusing existing CSR", certName)
 	}
 
 	// Retrieve the pending operation to get the DER-encoded CSR.
@@ -476,6 +482,15 @@ func extractPrivateKeyPEM(bundle []byte) []byte {
 		}
 	}
 	return out
+}
+
+// isConflict reports whether an AKV error is a 409 Conflict (pending operation still inProgress).
+func isConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "409") ||
+		strings.Contains(err.Error(), "Conflict")
 }
 
 // isNotFound reports whether an AKV error is a 404.
