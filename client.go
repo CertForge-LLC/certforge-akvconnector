@@ -15,13 +15,15 @@ import (
 type certForgeClient struct {
 	baseURL string
 	apiKey  string
+	version string // reported to CertForge on every poll via X-Connector-Version header
 	http    *http.Client
 }
 
-func newCertForgeClient(baseURL, apiKey string) *certForgeClient {
+func newCertForgeClient(baseURL, apiKey, version string) *certForgeClient {
 	return &certForgeClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
+		version: version,
 		http:    &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -34,6 +36,8 @@ type Job struct {
 }
 
 // PollJobs fetches pending keystore jobs for this connector.
+// The X-Connector-Version header is included on every poll so CertForge can
+// display the connector version without requiring a manual ping.
 func (c *certForgeClient) PollJobs(connectorID string) ([]Job, error) {
 	url := fmt.Sprintf("%s/api/v1/connector/keystore/jobs?connector_id=%s", c.baseURL, connectorID)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -41,6 +45,9 @@ func (c *certForgeClient) PollJobs(connectorID string) ([]Job, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.version != "" {
+		req.Header.Set("X-Connector-Version", c.version)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

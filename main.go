@@ -44,7 +44,7 @@ func main() {
 		log.Fatalf("akv: %v", err)
 	}
 
-	cfClient := newCertForgeClient(cfg.CertForgeURL, cfg.APIKey)
+	cfClient := newCertForgeClient(cfg.CertForgeURL, cfg.APIKey, Version)
 
 	worker := &Worker{
 		cfg:     cfg,
