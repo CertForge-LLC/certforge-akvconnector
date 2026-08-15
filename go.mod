@@ -1,6 +1,6 @@
 module github.com/CertForge-LLC/certforge-akvconnector
 
-go 1.22
+go 1.26.6
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.8.2
