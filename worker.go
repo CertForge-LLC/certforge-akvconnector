@@ -131,7 +131,8 @@ func (w *Worker) handleExportKey(ctx context.Context, job Job) error {
 		return fmt.Errorf("export_key: key_ref is required")
 	}
 
-	log.Printf("[worker] export_key: exporting key %q from AKV", params.KeyRef)
+	// export_key returns private key material — log prominently for audit visibility.
+	log.Printf("[worker] [SECURITY] export_key: exporting private key %q from AKV (job %s)", params.KeyRef, job.ID)
 
 	keyPEM, err := w.akv.ExportKeyPEM(ctx, params.KeyRef)
 	if err != nil {
@@ -145,7 +146,7 @@ func (w *Worker) handleExportKey(ctx context.Context, job Job) error {
 		return fmt.Errorf("complete job: %w", err)
 	}
 
-	log.Printf("[worker] export_key: key %q exported", params.KeyRef)
+	log.Printf("[worker] [SECURITY] export_key: private key %q exported and delivered to CertForge (job %s)", params.KeyRef, job.ID)
 	return nil
 }
 
@@ -161,10 +162,23 @@ func (w *Worker) handleDeleteKey(ctx context.Context, job Job) error {
 		return w.cf.CompleteJob(job.ID, map[string]bool{"ok": true})
 	}
 
-	log.Printf("[worker] delete_key: deleting %q from AKV", params.KeyRef)
+	log.Printf("[worker] delete_key: deleting %q from AKV (purge_on_delete=%v)", params.KeyRef, w.cfg.PurgeOnDelete)
 
 	if err := w.akv.DeleteCertificate(ctx, params.KeyRef); err != nil {
 		return fmt.Errorf("delete_key: %w", err)
+	}
+
+	// When purge_on_delete is enabled, permanently remove the soft-deleted certificate
+	// so that the same key name can be re-created immediately (e.g. on renewal after
+	// revocation). Requires the Key Vault Certificate Purge permission on the vault.
+	if w.cfg.PurgeOnDelete {
+		if err := w.akv.PurgeDeletedCertificate(ctx, params.KeyRef); err != nil {
+			// Non-fatal: the cert was soft-deleted successfully; purge failure is
+			// logged but does not fail the job. The operator can purge manually.
+			log.Printf("[worker] delete_key: purge %q failed (soft-delete succeeded): %v", params.KeyRef, err)
+		} else {
+			log.Printf("[worker] delete_key: %q purged (permanently deleted)", params.KeyRef)
+		}
 	}
 
 	if err := w.cf.CompleteJob(job.ID, map[string]bool{"ok": true}); err != nil {

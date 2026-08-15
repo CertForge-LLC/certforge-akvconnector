@@ -1,0 +1,116 @@
+# certforge-akvconnector — Kubernetes deployment
+#
+# Two authentication modes are shown; uncomment the one that matches your setup.
+#
+# MODE A: AKS Workload Identity (recommended for AKS clusters)
+#   - Requires: AKS OIDC issuer enabled, Azure Workload Identity webhook installed
+#   - Identity: Federated credentials from a User-Assigned Managed Identity
+#   - No Azure credentials stored in the cluster
+#
+# MODE B: Service Principal via Secret
+#   - Works on any Kubernetes cluster with outbound access to Azure
+#   - Requires: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET in a Secret
+#
+# In both modes, CertForge credentials (API key) come from a Kubernetes Secret.
+# Replace all <PLACEHOLDER> values before applying.
+
+---
+# CertForge API key — create with:
+#   kubectl create secret generic certforge-akvconnector-secrets \
+#     --namespace certforge-system \
+#     --from-literal=CERTFORGE_API_KEY=cc_...
+apiVersion: v1
+kind: Secret
+metadata:
+  name: certforge-akvconnector-secrets
+  namespace: certforge-system
+type: Opaque
+stringData:
+  CERTFORGE_API_KEY: "<your-certforge-api-key>"
+  # MODE B only — remove if using workload identity:
+  # AZURE_TENANT_ID: "<your-azure-tenant-id>"
+  # AZURE_CLIENT_ID: "<your-service-principal-client-id>"
+  # AZURE_CLIENT_SECRET: "<your-service-principal-client-secret>"
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: certforge-akvconnector
+  namespace: certforge-system
+  annotations:
+    # MODE A: AKS Workload Identity — set to the client ID of the User-Assigned Managed Identity
+    # that has Key Vault certificate permissions. Remove this annotation for MODE B.
+    azure.workload.identity/client-id: "<your-managed-identity-client-id>"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: certforge-akvconnector
+  namespace: certforge-system
+  labels:
+    app: certforge-akvconnector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: certforge-akvconnector
+  template:
+    metadata:
+      labels:
+        app: certforge-akvconnector
+        # MODE A: required by the AKS Workload Identity webhook to inject the
+        # federated token volume. Remove for MODE B.
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: certforge-akvconnector
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: connector
+          image: ghcr.io/certforge-llc/certforge-akvconnector:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          env:
+            - name: CERTFORGE_URL
+              value: "https://app.certgovernance.app"   # or https://eu.certgovernance.app
+            - name: CERTFORGE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: certforge-akvconnector-secrets
+                  key: CERTFORGE_API_KEY
+            - name: CONNECTOR_ID
+              value: "<connector-id-from-certforge-ui>"
+            - name: AKV_VAULT_URL
+              value: "https://<your-vault>.vault.azure.net"
+            # MODE B only — remove if using workload identity:
+            # - name: AZURE_TENANT_ID
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: certforge-akvconnector-secrets
+            #       key: AZURE_TENANT_ID
+            # - name: AZURE_CLIENT_ID
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: certforge-akvconnector-secrets
+            #       key: AZURE_CLIENT_ID
+            # - name: AZURE_CLIENT_SECRET
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: certforge-akvconnector-secrets
+            #       key: AZURE_CLIENT_SECRET
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

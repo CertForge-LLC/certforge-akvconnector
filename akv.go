@@ -5,11 +5,13 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azcertificates"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
@@ -130,10 +132,23 @@ func (a *akvClient) GenerateKeyCSR(ctx context.Context, certName string, p Gener
 			},
 		},
 	}, nil)
-	if err != nil && !isConflict(err) {
-		return nil, fmt.Errorf("create certificate %s: %w", certName, err)
-	}
-	if isConflict(err) {
+	if err != nil {
+		if isSoftDeleted(err) {
+			// AKV soft-delete is active and a previous certificate with this name was
+			// deleted but not yet purged. The key cannot be re-created until it is purged.
+			// Enable purge_on_delete in the connector config to handle this automatically,
+			// or purge the certificate manually via the Azure portal / az cli:
+			//   az keyvault certificate purge --vault-name <vault> --name <certName>
+			return nil, fmt.Errorf(
+				"certificate %s is soft-deleted in AKV and cannot be re-created until purged: "+
+					"enable purge_on_delete in connector config or purge manually: "+
+					"az keyvault certificate purge --vault-name <vault> --name %s",
+				certName, certName,
+			)
+		}
+		if !isPendingOp(err) {
+			return nil, fmt.Errorf("create certificate %s: %w", certName, err)
+		}
 		// A previous generate_key_csr left a pending operation (e.g. the prior
 		// attempt timed out before merge). Reuse the existing CSR so the retry
 		// can proceed without needing to cancel and recreate the key.
@@ -210,10 +225,25 @@ func (a *akvClient) ExportKeyPEM(ctx context.Context, certName string) (keyPEM [
 	return keyPEM, nil
 }
 
-// DeleteCertificate deletes the AKV certificate (and its associated key).
-// Best-effort: returns nil on 404.
+// DeleteCertificate soft-deletes the AKV certificate (and its associated key).
+// Best-effort: returns nil on 404. With AKV soft-delete enabled (the default),
+// the certificate enters a recoverable state for the vault's retention period
+// (default 90 days) before being permanently removed.
+// Call PurgeDeletedCertificate afterward to permanently delete immediately.
 func (a *akvClient) DeleteCertificate(ctx context.Context, certName string) error {
 	_, err := a.certClient.DeleteCertificate(ctx, certName, nil)
+	if err != nil && isNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// PurgeDeletedCertificate permanently deletes a soft-deleted certificate,
+// bypassing the vault's soft-delete retention period. Requires the
+// "Key Vault Certificate Purge" permission on the vault.
+// Returns nil if the certificate is not in the deleted state (already purged or never deleted).
+func (a *akvClient) PurgeDeletedCertificate(ctx context.Context, certName string) error {
+	_, err := a.certClient.PurgeDeletedCertificate(ctx, certName, nil)
 	if err != nil && isNotFound(err) {
 		return nil
 	}
@@ -484,23 +514,37 @@ func extractPrivateKeyPEM(bundle []byte) []byte {
 	return out
 }
 
-// isConflict reports whether an AKV error is a 409 Conflict (pending operation still inProgress).
-func isConflict(err error) bool {
-	if err == nil {
+// isPendingOp reports whether an AKV 409 is caused by an in-progress certificate operation
+// (e.g. a previous generate_key_csr that hasn't been merged yet). Distinct from a soft-deleted
+// conflict — both are 409s but with different error codes.
+func isPendingOp(err error) bool {
+	var re *azcore.ResponseError
+	if !errors.As(err, &re) || re.StatusCode != 409 {
 		return false
 	}
-	return strings.Contains(err.Error(), "409") ||
-		strings.Contains(err.Error(), "Conflict")
+	// Soft-deleted certs have "DeletedButRecoverable" in the error code or message.
+	// A pending-operation 409 does not.
+	msg := re.Error()
+	return !strings.Contains(msg, "deleted") && !strings.Contains(msg, "recoverable") &&
+		!strings.Contains(msg, "DeletedButRecoverable")
+}
+
+// isSoftDeleted reports whether an AKV 409 is caused by the certificate existing in a
+// soft-deleted (recoverable) state. The key cannot be re-created until purged.
+func isSoftDeleted(err error) bool {
+	var re *azcore.ResponseError
+	if !errors.As(err, &re) || re.StatusCode != 409 {
+		return false
+	}
+	msg := re.Error()
+	return strings.Contains(msg, "deleted") || strings.Contains(msg, "recoverable") ||
+		strings.Contains(msg, "DeletedButRecoverable")
 }
 
 // isNotFound reports whether an AKV error is a 404.
 func isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "404") ||
-		strings.Contains(err.Error(), "CertificateNotFound") ||
-		strings.Contains(err.Error(), "SecretNotFound")
+	var re *azcore.ResponseError
+	return errors.As(err, &re) && re.StatusCode == 404
 }
 
 // akvSanitize replaces any character not in [a-zA-Z0-9-] with a hyphen.

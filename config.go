@@ -19,8 +19,9 @@ type Config struct {
 	VaultURL string `yaml:"vault_url"` // e.g. https://myvault.vault.azure.net
 
 	// Behaviour
-	PollInterval time.Duration `yaml:"poll_interval"` // how often to check for pending jobs; default 5s
-	LogLevel     string        `yaml:"log_level"`     // "info" (default) | "debug"
+	PollInterval  time.Duration `yaml:"poll_interval"`  // how often to check for pending jobs; default 5s
+	LogLevel      string        `yaml:"log_level"`      // "info" (default) | "debug"
+	PurgeOnDelete bool          `yaml:"purge_on_delete"` // permanently purge AKV certs on delete_key (bypasses soft-delete retention); requires Certificate Purge permission
 }
 
 func loadConfig(path string) (*Config, error) {
