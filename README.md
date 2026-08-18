@@ -34,6 +34,12 @@ After `merge_certificate`, AKV's expiry tracking, rotation policies, and Azure s
 
 For the `issue_with_ca` path (AKV integrated CAs such as DigiCert/GlobalSign), AKV handles the full lifecycle internally — no separate merge job is sent.
 
+## Prerequisites
+
+- A CertForge account — [sign up free](https://app.certgovernance.app/signup?source=akv-connector) (100 certs, 25 domains; no credit card required) or [self-host](https://app.certgovernance.app/download?source=akv-connector)
+- An Azure Key Vault with a managed identity, service principal, or Azure CLI credentials that have at minimum **Certificates: Get, List, Create, Delete** permissions
+- Go 1.21+ (if building from source)
+
 ## Quick start
 
 ### 1. Create an API key in CertForge
