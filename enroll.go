@@ -73,7 +73,7 @@ func runEnroll(args []string) {
 		"token":      *token,
 		"csr_pem":    csrPEM,
 		"label":      *label,
-		"agent_type": "connector",
+		"agent_type": "akv",
 	})
 	hc := &http.Client{
 		Timeout: 30 * time.Second,
