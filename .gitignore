@@ -9,3 +9,4 @@ certforge-akvconnector.yaml
 *.test
 *.out
 vendor/
+creds/
