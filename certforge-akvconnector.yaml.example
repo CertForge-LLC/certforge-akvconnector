@@ -2,50 +2,100 @@
 # Copy to certforge-akvconnector.yaml and fill in your values.
 # All fields can also be set via environment variables (see comments).
 
-# CertForge connection
-certforge_url: https://app.certgovernance.app   # $CERTFORGE_URL
-api_key: cc_your_api_key_here                   # $CERTFORGE_API_KEY — org-scoped API key from CertForge Settings > API Keys
-connector_id: your-connector-id-here            # $CONNECTOR_ID — ID shown in CertForge CA Connectors page (copy from the table)
+# ─── Connection ───────────────────────────────────────────────────────────────
 
-# Azure Key Vault
-vault_url: https://myvault.vault.azure.net      # $AKV_VAULT_URL
+# URL of your CertForge instance.
+certforge_url: https://app.certgov.app   # $CERTFORGE_URL
 
-# Polling behaviour (optional)
-poll_interval: 5s   # how often to check for pending jobs; default 5s
-log_level: info     # "info" or "debug"
+# Connector ID from CertForge → Integrations → CA Connectors (copy from the table).
+connector_id: your-connector-id-here     # $CONNECTOR_ID
 
-# ─── Authentication ───────────────────────────────────────────────────────────
+# Azure Key Vault URL.
+vault_url: https://myvault.vault.azure.net   # $AKV_VAULT_URL
+
+# ─── CertForge authentication — choose ONE option ────────────────────────────
+
+# Option A: mTLS client certificate (recommended)
+# Connects directly to the CertForge agent endpoint, bypassing Cloudflare.
+# Run the enroll command to generate credentials:
 #
-# This connector uses Azure DefaultAzureCredential, which tries the following
-# in order — no config required for the first option that succeeds:
+#   certforge-akvconnector enroll \
+#     --token <one-time-token>   \  # from CertForge → Integrations → Connector Agents → Enroll
+#     --url   <certforge-url>    \
+#     --label <name>             \
+#     --out   ./creds               # writes client.crt, client.key, server.crt
+#
+# mtls_host: usagent.certgov.app   # direct-DNS hostname printed by enroll
+# mtls_port: 8443                  # 8443 prod · 8444 dev/preview
+# mtls_cert: ./creds/client.crt
+# mtls_key:  ./creds/client.key
+# mtls_ca:   ./creds/server.crt    # pinned server cert — no system trust store needed
+
+# Option B: API key (legacy — comment out the mtls_* lines above, uncomment below)
+# api_key: $CERTFORGE_API_KEY      # connector-scoped key from Settings → API Keys
+
+# ─── Poll interval ────────────────────────────────────────────────────────────
+
+# How often to check for pending jobs (default 5s).
+poll_interval: 5s
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+
+log_level: info   # "info" or "debug"
+
+# ─── Purge on delete ──────────────────────────────────────────────────────────
+
+# Permanently purge soft-deleted certificates after delete_key.
+# When false (default), deleted certs enter AKV soft-delete for the vault's
+# retention period (default 90 days). Enable only if you need to re-create
+# keys with the same name immediately after deletion.
+# Requires Key Vault Certificates: Purge permission.
+# purge_on_delete: false
+
+# ─── Azure authentication ─────────────────────────────────────────────────────
+#
+# Azure Key Vault access uses DefaultAzureCredential — tries in order:
 #
 #   1. Environment variables (Service Principal):
-#        AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET  (client secret)
-#        AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_CERTIFICATE_PATH  (cert)
+#        AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
 #
-#   2. Workload Identity Federation (OIDC — no secrets, recommended for GKE/EKS):
+#   2. Workload Identity Federation (OIDC — no secrets, recommended for AKS/GKE/EKS):
 #        AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE
 #
 #   3. Managed Identity (Azure VMs, AKS, Container Apps — zero config):
-#        Automatically uses the assigned identity; no variables needed.
+#        Automatically uses the assigned identity.
 #        Set AZURE_CLIENT_ID if using a user-assigned managed identity.
 #
 #   4. Azure CLI (local development):
 #        Run `az login` once; the connector picks up the session automatically.
 #
-# The connector requires these Key Vault permissions on the vault:
-#   - Certificates: Get, List, Create, Delete
-#   - Secrets: Get  (needed only for exportable key export)
+# ─── Kubernetes example (mTLS + Managed Identity) ────────────────────────────
 #
-# ─── Kubernetes example ───────────────────────────────────────────────────────
-#
-#   Use a ConfigMap for the non-secret fields and a Secret for api_key:
-#
-#   env:
-#     - name: CERTFORGE_API_KEY
-#       valueFrom:
-#         secretKeyRef:
-#           name: certforge-akvconnector
-#           key: api_key
-#     - name: AZURE_CLIENT_ID      # user-assigned managed identity
-#       value: "00000000-0000-0000-0000-000000000000"
+#   volumes:
+#     - name: certforge-mtls
+#       secret:
+#         secretName: certforge-akvconnector-mtls
+#   containers:
+#     - env:
+#         - name: CERTFORGE_URL
+#           value: https://app.certgov.app
+#         - name: CONNECTOR_ID
+#           value: "your-connector-id"
+#         - name: AKV_VAULT_URL
+#           value: https://myvault.vault.azure.net
+#         - name: MTLS_HOST
+#           value: usagent.certgov.app
+#         - name: MTLS_PORT
+#           value: "8443"
+#         - name: MTLS_CERT
+#           value: /etc/certforge/creds/client.crt
+#         - name: MTLS_KEY
+#           value: /etc/certforge/creds/client.key
+#         - name: MTLS_CA
+#           value: /etc/certforge/creds/server.crt
+#         - name: AZURE_CLIENT_ID    # user-assigned managed identity (if applicable)
+#           value: "00000000-0000-0000-0000-000000000000"
+#       volumeMounts:
+#         - name: certforge-mtls
+#           mountPath: /etc/certforge/creds
+#           readOnly: true

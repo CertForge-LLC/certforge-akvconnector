@@ -36,44 +36,85 @@ For the `issue_with_ca` path (AKV integrated CAs such as DigiCert/GlobalSign), A
 
 ## Prerequisites
 
-- A CertForge account — [sign up free](https://app.certgovernance.app/signup?source=akv-connector) (100 certs, 25 domains; no credit card required) or [self-host](https://app.certgovernance.app/download?source=akv-connector)
+- A CertForge account — [sign up free](https://app.certgov.app/signup?source=akv-connector) (100 certs, 25 domains; no credit card required) or [self-host](https://app.certgov.app/download?source=akv-connector)
 - An Azure Key Vault with a managed identity, service principal, or Azure CLI credentials that have at minimum **Certificates: Get, List, Create, Delete** permissions
 - Go 1.21+ (if building from source)
 
 ## Quick start
 
-### 1. Create an API key in CertForge
+### 1. Register the connector in CertForge
 
-Settings → API Keys → New Key → scope: `connector`
+Go to **Integrations → CA Connectors → New Connector → Azure Key Vault — Key Management Connector**.  
+Enter your vault URL and save. Copy the **Connector ID** from the table.
 
-### 2. Register the connector in CertForge
+### 2. Authenticate
 
-CA Connectors → Add Connector → type: **Azure Key Vault — Key Management Connector**  
-Enter your vault URL, save. Copy the **Connector ID** from the table.
+The connector supports two authentication methods for connecting back to CertForge. **mTLS is recommended** — it connects directly to the agent endpoint on port 8443 (or 8444 for preview), bypassing Cloudflare.
 
-### 3. Configure the connector
+#### Option A — mTLS enrollment (recommended)
+
+In CertForge: **Integrations → Connector Agents → + Enroll Agent → AKV Connector**. Give it a label (e.g. `prod-akv`) and copy the one-time token.
 
 ```bash
-cp certforge-akvconnector.yaml.example certforge-akvconnector.yaml
-# edit: certforge_url, api_key, connector_id, vault_url
+certforge-akvconnector enroll \
+  --token  <one-time-token>        \
+  --url    https://app.certgov.app \
+  --label  prod-akv                \
+  --out    ./creds
 ```
 
-### 4. Run
+This writes `client.crt`, `client.key`, and `server.crt` to `./creds`. Set `mtls_*` fields in your config:
+
+```yaml
+certforge_url: https://app.certgov.app
+connector_id: <your-connector-id>
+vault_url: https://myvault.vault.azure.net
+
+mtls_host: usagent.certgov.app
+mtls_port: 8443                    # 8443 prod · 8444 preview/dev
+mtls_cert: ./creds/client.crt
+mtls_key:  ./creds/client.key
+mtls_ca:   ./creds/server.crt
+
+poll_interval: 5s
+```
+
+#### Option B — API key (legacy)
 
 ```bash
-# Local (Azure CLI auth)
-az login
-./certforge-akvconnector
+# Settings → API Keys → New Key → scope: connector
+export CERTFORGE_API_KEY=cc_...
+```
 
-# Docker (managed identity)
+```yaml
+certforge_url: https://app.certgov.app
+api_key: $CERTFORGE_API_KEY
+connector_id: <your-connector-id>
+vault_url: https://myvault.vault.azure.net
+poll_interval: 5s
+```
+
+### 3. Run
+
+```bash
+# Local (Azure CLI auth for AKV)
+az login
+./certforge-akvconnector --config certforge-akvconnector.yaml
+
+# Docker (managed identity for AKV, mTLS for CertForge)
 docker run --rm \
-  -e CERTFORGE_URL=https://app.certgovernance.app \
-  -e CERTFORGE_API_KEY=cc_... \
+  -e CERTFORGE_URL=https://app.certgov.app \
   -e CONNECTOR_ID=... \
   -e AKV_VAULT_URL=https://myvault.vault.azure.net \
+  -e MTLS_HOST=usagent.certgov.app \
+  -e MTLS_PORT=8443 \
+  -e MTLS_CERT=/creds/client.crt \
+  -e MTLS_KEY=/creds/client.key \
+  -e MTLS_CA=/creds/server.crt \
+  -v ./creds:/creds:ro \
   ghcr.io/certforge-llc/certforge-akvconnector:latest
 
-# Kubernetes (AKS with workload identity)
+# Kubernetes (AKS with workload identity for AKV)
 # See deploy/kubernetes/deployment.yaml
 ```
 
@@ -116,7 +157,7 @@ Grant with least privilege: if your deployment does not use exportable keys, do 
 ## Configuration
 
 ```yaml
-certforge_url: https://app.certgovernance.app   # or https://eu.certgovernance.app
+certforge_url: https://app.certgov.app   # or https://eu.certgov.app
 api_key: $CERTFORGE_API_KEY                     # connector-scoped key from CertForge Settings
 connector_id: ...                               # from CA Connectors page in CertForge
 vault_url: https://myvault.vault.azure.net      # must be a known, controlled vault — see Security
@@ -184,7 +225,7 @@ The connector requires outbound HTTPS (port 443) only — no inbound ports.
 
 | Destination | Purpose |
 |-------------|---------|
-| `app.certgovernance.app` (US) or `eu.certgovernance.app` (EU) | CertForge job polling and result delivery |
+| `app.certgov.app` (US) or `eu.certgov.app` (EU) | CertForge job polling and result delivery |
 | `<your-vault>.vault.azure.net` | Azure Key Vault operations |
 | `login.microsoftonline.com` | Azure AD token acquisition (SP / workload identity auth) |
 | `<region>.oic.prod-aks.azure.com` | AKS OIDC token endpoint (workload identity only) |
