@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -28,6 +31,48 @@ func newCertForgeClient(baseURL, apiKey, version string) *certForgeClient {
 	}
 }
 
+// newCertForgeClientMTLS creates a client that authenticates via mTLS client cert
+// instead of a Bearer token. It connects directly to the mTLS port (bypassing
+// Cloudflare) and pins the server certificate so no system trust store is needed.
+//
+// certFile, keyFile, and caFile are paths to PEM files written by "enroll".
+func newCertForgeClientMTLS(baseURL, version, certFile, keyFile, caFile string) (*certForgeClient, error) {
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil, fmt.Errorf("read mTLS cert %s: %w", certFile, err)
+	}
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read mTLS key %s: %w", keyFile, err)
+	}
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read mTLS server cert %s: %w", caFile, err)
+	}
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("parse mTLS client cert/key: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("parse mTLS server cert for pinning: no PEM block found")
+	}
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			RootCAs:      pool,
+			MinVersion:   tls.VersionTLS12,
+		},
+	}
+	return &certForgeClient{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		apiKey:  "", // no bearer token — mTLS cert is the credential
+		version: version,
+		http:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
+	}, nil
+}
+
 // Job is a pending keystore operation delivered by the CertForge API.
 type Job struct {
 	ID        string          `json:"id"`
@@ -44,7 +89,9 @@ func (c *certForgeClient) PollJobs(connectorID string) ([]Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	if c.version != "" {
 		req.Header.Set("X-Connector-Version", c.version)
 	}
@@ -96,7 +143,9 @@ func (c *certForgeClient) postJob(jobID, action string, body []byte) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)

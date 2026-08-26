@@ -16,6 +16,12 @@ var Version = "dev"
 func main() {
 	log.SetOutput(os.Stdout)
 
+	// Sub-commands: enroll, (default: run)
+	if len(os.Args) > 1 && os.Args[1] == "enroll" {
+		runEnroll(os.Args[2:])
+		return
+	}
+
 	configPath := flag.String("config", "certforge-akvconnector.yaml", "path to config file")
 	versionFlag := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -44,7 +50,23 @@ func main() {
 		log.Fatalf("akv: %v", err)
 	}
 
-	cfClient := newCertForgeClient(cfg.CertForgeURL, cfg.APIKey, Version)
+	// Build the CertForge client — mTLS if configured, Bearer token otherwise.
+	var cfClient *certForgeClient
+	if cfg.MTLSConfigured() {
+		port := cfg.MTLSPort
+		if port == 0 {
+			port = 8443
+		}
+		mtlsBase := fmt.Sprintf("https://%s:%d", cfg.MTLSHost, port)
+		cfClient, err = newCertForgeClientMTLS(mtlsBase, Version, cfg.MTLSCert, cfg.MTLSKey, cfg.MTLSCA)
+		if err != nil {
+			log.Fatalf("mTLS client: %v", err)
+		}
+		log.Printf("auth:          mTLS → %s", mtlsBase)
+	} else {
+		cfClient = newCertForgeClient(cfg.CertForgeURL, cfg.APIKey, Version)
+		log.Printf("auth:          Bearer token")
+	}
 
 	worker := &Worker{
 		cfg:     cfg,
