@@ -83,8 +83,14 @@ type Job struct {
 // PollJobs fetches pending keystore jobs for this connector.
 // The X-Connector-Version header is included on every poll so CertForge can
 // display the connector version without requiring a manual ping.
-func (c *certForgeClient) PollJobs(connectorID string) ([]Job, error) {
-	url := fmt.Sprintf("%s/api/v1/connector/keystore/jobs?connector_id=%s", c.baseURL, connectorID)
+// pollInterval is sent as poll_interval_seconds so the server can display the
+// configured poll cadence in the Agent Registry.
+func (c *certForgeClient) PollJobs(connectorID string, pollInterval time.Duration) ([]Job, error) {
+	secs := int(pollInterval.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	url := fmt.Sprintf("%s/api/v1/connector/keystore/jobs?connector_id=%s&poll_interval_seconds=%d", c.baseURL, connectorID, secs)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

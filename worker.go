@@ -35,7 +35,7 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) pollOnce(ctx context.Context) error {
-	jobs, err := w.cf.PollJobs(w.cfg.ConnectorID)
+	jobs, err := w.cf.PollJobs(w.cfg.ConnectorID, w.cfg.PollInterval)
 	if err != nil {
 		return fmt.Errorf("poll: %w", err)
 	}
