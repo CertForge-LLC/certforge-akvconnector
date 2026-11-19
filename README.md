@@ -1,5 +1,10 @@
 # certforge-akvconnector
 
+> [!WARNING]
+> **Retired — this repository is archived and no longer maintained.**
+> Use **[certgov-agent](https://github.com/CertForge-LLC/certgov-agent)**, CertGov's single agent for delivering certificates to servers, appliances and key stores. It replaces certforge-akvconnector.
+> Existing releases stay available for reference, but new enrollments should use certgov-agent.
+
 Lightweight open-source connector that bridges **CertForge** certificate governance with **Azure Key Vault** for managed-identity key management.
 
 Keys are generated inside AKV (HSM-backed, non-exportable by default). CertForge handles the CA signing workflow (ACME, DigiCert, self-signed, internal CA). The connector is the glue: it receives key generation jobs from CertForge, executes them against AKV, and returns the CSR.
